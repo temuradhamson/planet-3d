@@ -10,15 +10,27 @@ import { buildLayers, loadLayers, pick, setHover, updateLayerLod } from "./layer
 import { bindSearch, bindTimeScale, bindUI, hideLoader, renderClock, setLoader, showCard } from "./ui.js";
 
 const canvas = document.getElementById("globe");
+const app = document.getElementById("app");
 const ui = bindUI();
+
+function viewSize() {
+  const w = Math.max(app.clientWidth, window.innerWidth, document.documentElement.clientWidth, 1);
+  const h = Math.max(app.clientHeight, window.innerHeight, document.documentElement.clientHeight, 1);
+  return { w, h };
+}
+
+function pointerNdc(e, target) {
+  const rect = canvas.getBoundingClientRect();
+  target.x = ((e.clientX - rect.left) / Math.max(rect.width, 1)) * 2 - 1;
+  target.y = -((e.clientY - rect.top) / Math.max(rect.height, 1)) * 2 + 1;
+  return target;
+}
 
 const renderer = new THREE.WebGLRenderer({
   canvas,
   antialias: true,
   powerPreference: "high-performance",
 });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -26,7 +38,6 @@ renderer.toneMappingExposure = 1.05;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 
 const labelRenderer = new CSS2DRenderer({ element: document.getElementById("labels") });
-labelRenderer.setSize(window.innerWidth, window.innerHeight);
 labelRenderer.domElement.style.position = "absolute";
 labelRenderer.domElement.style.inset = "0";
 labelRenderer.domElement.style.pointerEvents = "none";
@@ -34,8 +45,10 @@ labelRenderer.domElement.style.pointerEvents = "none";
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x02040a);
 
-const camera = new THREE.PerspectiveCamera(42, window.innerWidth / window.innerHeight, 0.05, 600);
+const { w: startW, h: startH } = viewSize();
+const camera = new THREE.PerspectiveCamera(42, startW / startH, 0.05, 600);
 placeCamera(WORLD_VIEW.lon, WORLD_VIEW.lat, WORLD_VIEW.dist);
+applySize();
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
@@ -97,7 +110,9 @@ async function init() {
 
   renderer.domElement.addEventListener("pointermove", onMove);
   renderer.domElement.addEventListener("click", onClick);
-  window.addEventListener("resize", onResize);
+  window.addEventListener("resize", applySize);
+  window.visualViewport?.addEventListener("resize", applySize);
+  new ResizeObserver(applySize).observe(app);
   window.addEventListener("keydown", onKey);
 
   hideLoader(ui);
@@ -158,8 +173,7 @@ function tick() {
 
 function onMove(e) {
   if (!layers) return;
-  ndc.x = (e.clientX / window.innerWidth) * 2 - 1;
-  ndc.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  pointerNdc(e, ndc);
   const mesh = pick(layers, camera, ndc);
   const hovered = setHover(mesh);
   renderer.domElement.style.cursor = hovered ? "pointer" : "grab";
@@ -168,8 +182,7 @@ function onMove(e) {
 
 function onClick(e) {
   if (!layers) return;
-  ndc.x = (e.clientX / window.innerWidth) * 2 - 1;
-  ndc.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  pointerNdc(e, ndc);
   const mesh = pick(layers, camera, ndc);
   if (!mesh) return;
   const d = mesh.userData;
@@ -211,9 +224,11 @@ function placeCamera(lon, lat, dist) {
   camera.lookAt(0, 0, 0);
 }
 
-function onResize() {
-  camera.aspect = window.innerWidth / window.innerHeight;
+function applySize() {
+  const { w, h } = viewSize();
+  camera.aspect = w / h;
   camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  labelRenderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(w, h, false);
+  labelRenderer.setSize(w, h);
 }
