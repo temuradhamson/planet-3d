@@ -7,6 +7,7 @@ import {
   polygonRings,
   EARTH_R,
 } from "./coords.js";
+import { assetUrl } from "./asset.js";
 import { admFact, countryFact, displayAdminName } from "./data.js";
 
 const CA = new Set(["KAZ", "UZB", "TJK"]);
@@ -14,13 +15,13 @@ const _n = new THREE.Vector3();
 
 export async function loadLayers(onProgress) {
   onProgress?.("границы стран");
-  const countries = await fetchJson("/geo/countries.min.geojson");
+  const countries = await fetchJson(assetUrl("geo/countries.min.geojson"));
   onProgress?.("области Центральной Азии");
-  const adm1 = await fetchJson("/geo/ca-adm1.min.geojson");
+  const adm1 = await fetchJson(assetUrl("geo/ca-adm1.min.geojson"));
   onProgress?.("районы KZ / UZ / TJ");
-  const adm2 = await fetchJson("/geo/ca-adm2.min.geojson");
+  const adm2 = await fetchJson(assetUrl("geo/ca-adm2.min.geojson"));
   onProgress?.("карточки демографии");
-  const meta = await fetchJson("/data/meta.json");
+  const meta = await fetchJson(assetUrl("data/meta.json"));
   return { countries, adm1, adm2, meta };
 }
 

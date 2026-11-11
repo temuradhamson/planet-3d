@@ -3,6 +3,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { CSS2DRenderer } from "three/addons/renderers/CSS2DRenderer.js";
 import { astroState, makeClock, nowDate, setScale } from "./astro.js";
 import { lonLatToVector3 } from "./coords.js";
+import { assetUrl } from "./asset.js";
 import { admFact, CA_FOCUS, countryFact, WORLD_VIEW } from "./data.js";
 import { createGlobe, updateAstroVisuals } from "./globe.js";
 import { buildLayers, loadLayers, pick, setHover, updateLayerLod } from "./layers.js";
@@ -120,12 +121,12 @@ function loadTextures() {
       );
     });
   return Promise.all([
-    load("/textures/earth_blue.jpg"),
-    load("/textures/earth_night2.jpg"),
-    load("/textures/earth_normal.jpg", false),
-    load("/textures/earth_spec.jpg", false),
-    load("/textures/moon.jpg"),
-    load("/textures/starmap.jpg"),
+    load(assetUrl("textures/earth_blue.jpg")),
+    load(assetUrl("textures/earth_night2.jpg")),
+    load(assetUrl("textures/earth_normal.jpg"), false),
+    load(assetUrl("textures/earth_spec.jpg"), false),
+    load(assetUrl("textures/moon.jpg")),
+    load(assetUrl("textures/starmap.jpg")),
   ]).then(([day, night, normal, spec, moon, starmap]) => ({
     day,
     night,
