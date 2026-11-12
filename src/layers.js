@@ -5,6 +5,7 @@ import {
   densifyRing,
   lonLatToVector3,
   polygonRings,
+  vector3ToLonLat,
   EARTH_R,
 } from "./coords.js";
 import { assetUrl } from "./asset.js";
@@ -12,17 +13,21 @@ import { admFact, countryFact, displayAdminName } from "./data.js";
 
 const CA = new Set(["KAZ", "UZB", "TJK"]);
 const _n = new THREE.Vector3();
+const _hit = new THREE.Vector3();
+const _sphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), EARTH_R);
 
 export async function loadLayers(onProgress) {
   onProgress?.("границы стран");
   const countries = await fetchJson(assetUrl("geo/countries.min.geojson"));
-  onProgress?.("области Центральной Азии");
-  const adm1 = await fetchJson(assetUrl("geo/ca-adm1.min.geojson"));
+  onProgress?.("области мира");
+  const adm1 = await fetchJson(assetUrl("geo/world-adm1.min.geojson"));
   onProgress?.("районы KZ / UZ / TJ");
   const adm2 = await fetchJson(assetUrl("geo/ca-adm2.min.geojson"));
+  onProgress?.("города");
+  const cities = await fetchJson(assetUrl("geo/world-cities.min.json"));
   onProgress?.("карточки демографии");
   const meta = await fetchJson(assetUrl("data/meta.json"));
-  return { countries, adm1, adm2, meta };
+  return { countries, adm1, adm2, cities, meta };
 }
 
 async function fetchJson(url) {
@@ -74,15 +79,19 @@ export function buildLayers(data) {
     countryFills.add(mesh);
   }
 
+  const caAdm1 = data.adm1.features.filter((f) => CA.has(f.properties.iso));
+  const worldAdm1 = data.adm1.features.filter((f) => !CA.has(f.properties.iso));
+
   const adm1Fills = new THREE.Group();
   adm1Fills.name = "adm1-fills";
   const adm1Lines = buildLineGroup(data.adm1.features, {
     color: 0xe4c27a,
-    opacity: 0.85,
+    opacity: 0.55,
     radius: EARTH_R * 1.0042,
-    maxDeg: 0.7,
+    maxDeg: 0.85,
   });
-  for (const f of data.adm1.features) {
+  adm1Lines.name = "adm1-borders";
+  for (const f of caAdm1) {
     const p = f.properties;
     const extra = admFact(p.iso, p.name, "adm1");
     const mesh = polygonMesh(f.geometry, EARTH_R * 1.0036, {
@@ -91,17 +100,7 @@ export function buildLayers(data) {
       maxDeg: 0.65,
     });
     if (!mesh) continue;
-    mesh.userData = {
-      kind: "adm1",
-      iso: p.iso,
-      name: displayAdminName(p.iso, p.name),
-      nameEn: p.name,
-      pop: extra.pop || null,
-      areaKm2: p.areaKm2,
-      lon: p.lon,
-      lat: p.lat,
-      extra,
-    };
+    mesh.userData = adm1UserData(p, extra);
     adm1Fills.add(mesh);
   }
 
@@ -135,6 +134,9 @@ export function buildLayers(data) {
     adm2Fills.add(mesh);
   }
 
+  const cities = buildCities(data.cities);
+  const highlight = makeHighlight();
+
   const labels = new THREE.Group();
   labels.name = "labels";
   const caLabels = [
@@ -145,9 +147,10 @@ export function buildLayers(data) {
   for (const L of caLabels) labels.add(makeLabel(L.name, L.lon, L.lat, L.kind, 1.035));
   for (const f of data.adm1.features) {
     const p = f.properties;
-    labels.add(
-      makeLabel(displayAdminName(p.iso, p.name), p.lon, p.lat, "adm1", 1.028)
-    );
+    const important = CA.has(p.iso) || (p.labelrank != null && p.labelrank <= 2);
+    if (!important) continue;
+    const title = p.nameRu && /[А-Яа-яЁё]/.test(p.nameRu) ? p.nameRu : displayAdminName(p.iso, p.name);
+    labels.add(makeLabel(title, p.lon, p.lat, "adm1", 1.028));
   }
   const adm2LabelObjs = [];
   for (const f of data.adm2.features) {
@@ -157,8 +160,28 @@ export function buildLayers(data) {
     labels.add(obj);
     adm2LabelObjs.push(obj);
   }
+  for (const c of data.cities) {
+    const major = c.cap === 2 || (c.pop || 0) >= 1_000_000 || c.rank <= 3 || (CA.has(c.iso) && (c.pop || 0) >= 120_000);
+    if (!major) continue;
+    const obj = makeLabel(c.name, c.lon, c.lat, "city", 1.009);
+    obj.userData.pop = c.pop || 0;
+    obj.userData.cap = c.cap || 0;
+    obj.userData.rank = c.rank || 99;
+    obj.visible = false;
+    labels.add(obj);
+  }
 
-  group.add(countryFills, countryLines, adm1Fills, adm1Lines, adm2Fills, adm2Lines, labels);
+  group.add(
+    countryFills,
+    countryLines,
+    adm1Fills,
+    adm1Lines,
+    adm2Fills,
+    adm2Lines,
+    cities.points,
+    highlight,
+    labels
+  );
 
   return {
     group,
@@ -168,11 +191,141 @@ export function buildLayers(data) {
     adm1Lines,
     adm2Fills,
     adm2Lines,
+    cityPoints: cities.points,
+    cityIndex: cities.index,
+    highlight,
     labels,
     adm2LabelObjs,
+    worldAdm1,
     pickables: [...countryFills.children, ...adm1Fills.children, ...adm2Fills.children],
     index: buildSearchIndex(data),
   };
+}
+
+function adm1UserData(p, extra) {
+  const ru = p.nameRu && /[А-Яа-яЁё]/.test(p.nameRu) ? p.nameRu : displayAdminName(p.iso, p.name);
+  return {
+    kind: "adm1",
+    iso: p.iso,
+    name: ru,
+    nameEn: p.nameEn || p.name,
+    pop: extra.pop || null,
+    areaKm2: p.areaKm2,
+    lon: p.lon,
+    lat: p.lat,
+    extra: {
+      ...extra,
+      capital: extra.capital,
+      fact: extra.fact || (p.type ? `${p.admin || p.iso} · ${p.type}` : extra.fact),
+    },
+    type: p.type,
+    admin: p.admin,
+  };
+}
+
+function buildCities(rows) {
+  const pos = [];
+  const col = [];
+  const index = [];
+  for (const c of rows) {
+    lonLatToVector3(c.lon, c.lat, EARTH_R * 1.006, _n);
+    pos.push(_n.x, _n.y, _n.z);
+    if (c.cap === 2) col.push(1.0, 0.86, 0.42);
+    else if ((c.pop || 0) > 3_000_000) col.push(0.95, 0.95, 1.0);
+    else col.push(0.75, 0.85, 1.0);
+    index.push(c);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
+  const points = new THREE.Points(
+    g,
+    new THREE.PointsMaterial({
+      size: 0.007,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.88,
+      depthWrite: false,
+      sizeAttenuation: true,
+      map: citySprite(),
+      alphaTest: 0.2,
+    })
+  );
+  points.name = "cities";
+  points.renderOrder = 4;
+  return { points, index };
+}
+
+function citySprite() {
+  const c = document.createElement("canvas");
+  c.width = c.height = 64;
+  const g = c.getContext("2d");
+  const grd = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grd.addColorStop(0, "rgba(255,255,255,1)");
+  grd.addColorStop(0.35, "rgba(220,235,255,0.9)");
+  grd.addColorStop(1, "rgba(180,210,255,0)");
+  g.fillStyle = grd;
+  g.fillRect(0, 0, 64, 64);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+function cityUserData(c) {
+  const cap =
+    c.cap === 2 ? "столица страны" : c.cap === 1 ? "центр региона" : c.feat || "";
+  return {
+    kind: "city",
+    iso: c.iso,
+    name: c.name,
+    nameEn: c.nameEn,
+    pop: c.pop,
+    lon: c.lon,
+    lat: c.lat,
+    extra: {
+      capital: cap || undefined,
+      fact: [c.adm1, c.tz].filter(Boolean).join(" · "),
+    },
+  };
+}
+
+function makeHighlight() {
+  const line = new THREE.LineLoop(
+    new THREE.BufferGeometry(),
+    new THREE.LineBasicMaterial({
+      color: 0x7ee0ff,
+      transparent: true,
+      opacity: 0.95,
+      depthWrite: false,
+    })
+  );
+  line.name = "adm1-highlight";
+  line.visible = false;
+  line.renderOrder = 5;
+  return line;
+}
+
+function setHighlight(layers, feature) {
+  const line = layers.highlight;
+  if (!feature) {
+    line.visible = false;
+    return;
+  }
+  const rings = polygonRings(feature.geometry);
+  if (!rings.length) {
+    line.visible = false;
+    return;
+  }
+  const outer = densifyRing(rings[0][0], 0.45);
+  const pos = [];
+  for (const [lon, lat] of outer) {
+    lonLatToVector3(lon, lat, EARTH_R * 1.005, _n);
+    pos.push(_n.x, _n.y, _n.z);
+  }
+  line.geometry.dispose();
+  line.geometry = new THREE.BufferGeometry();
+  line.geometry.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  line.visible = true;
 }
 
 function buildSearchIndex(data) {
@@ -195,19 +348,20 @@ function buildSearchIndex(data) {
   }
   for (const f of data.adm1.features) {
     const p = f.properties;
-    const title = displayAdminName(p.iso, p.name);
+    const title =
+      p.nameRu && /[А-Яа-яЁё]/.test(p.nameRu) ? p.nameRu : displayAdminName(p.iso, p.name);
     const extra1 = admFact(p.iso, p.name, "adm1");
     rows.push({
       kind: "adm1",
       iso: p.iso,
       title,
-      sub: p.name,
+      sub: p.admin ? `${p.nameEn || p.name} · ${p.admin}` : p.name,
       lon: p.lon,
       lat: p.lat,
       dist: 1.55,
       pop: extra1.pop || null,
       areaKm2: p.areaKm2,
-      q: `${title} ${p.name} ${p.iso}`.toLowerCase(),
+      q: `${title} ${p.name} ${p.nameEn || ""} ${p.nameRu || ""} ${p.iso} ${p.admin || ""}`.toLowerCase(),
     });
   }
   for (const f of data.adm2.features) {
@@ -223,6 +377,23 @@ function buildSearchIndex(data) {
       dist: 1.28,
       areaKm2: p.areaKm2,
       q: `${title} ${p.name} ${p.iso}`.toLowerCase(),
+    });
+  }
+  for (const c of data.cities) {
+    rows.push({
+      kind: "city",
+      iso: c.iso,
+      title: c.name,
+      sub: [c.nameEn !== c.name ? c.nameEn : "", c.adm1, c.iso].filter(Boolean).join(" · "),
+      lon: c.lon,
+      lat: c.lat,
+      dist: 1.22,
+      pop: c.pop,
+      extra: {
+        capital: c.cap === 2 ? "столица страны" : c.cap === 1 ? "центр региона" : undefined,
+        fact: [c.adm1, c.tz].filter(Boolean).join(" · "),
+      },
+      q: `${c.name} ${c.nameEn} ${c.adm1} ${c.iso}`.toLowerCase(),
     });
   }
   return rows;
@@ -293,7 +464,6 @@ function triangulate(geom, radius, maxDeg) {
       const a = tris[i];
       const b = tris[i + 1];
       const c = tris[i + 2];
-      // drop sliver triangles that span the dateline
       const lons = [verts[a * 2], verts[b * 2], verts[c * 2]];
       const span = Math.max(...lons) - Math.min(...lons);
       if (span > 180) continue;
@@ -346,9 +516,14 @@ export function updateLayerLod(layers, camera) {
   layers.adm2Fills.visible = close;
   layers.adm2Lines.visible = close;
   layers.adm1Fills.visible = mid;
-  layers.adm1Lines.visible = dist < 4.2;
+  layers.adm1Lines.visible = dist < 4.4;
+  layers.adm1Lines.material.opacity = dist < 2.8 ? 0.7 : dist < 3.6 ? 0.42 : 0.22;
   layers.countryFills.visible = dist > 1.7;
   layers.countryLines.material.opacity = dist > 2.4 ? 0.42 : 0.22;
+  if (layers.cityPoints) {
+    layers.cityPoints.visible = dist < 2.2;
+    layers.cityPoints.material.size = dist < 1.45 ? 0.0042 : dist < 1.75 ? 0.0058 : 0.0075;
+  }
 
   const camDir = camera.position.clone().normalize();
   const proj = new THREE.Vector3();
@@ -359,51 +534,169 @@ export function updateLayerLod(layers, camera) {
     const kind = obj.userData.kind;
     let show = facing > 0.22;
     if (kind === "country") show = show && dist < 4.6 && dist > 2.05;
-    if (kind === "adm1") show = show && dist < 2.65 && dist > 1.62 && facing > 0.32;
+    if (kind === "adm1") show = show && dist < 2.55 && dist > 1.58 && facing > 0.52;
     if (kind === "adm2") show = show && dist < 1.52 && facing > 0.72;
+    if (kind === "city") {
+      const pop = obj.userData.pop || 0;
+      const cap = obj.userData.cap || 0;
+      const need = cap === 2 ? 2.15 : pop >= 5e6 ? 1.92 : pop >= 1e6 ? 1.68 : 1.48;
+      show = show && dist < need && facing > 0.55;
+    }
     obj.visible = false;
-    if (show) ranked.push({ obj, facing, kind });
+    if (show) ranked.push({ obj, facing, kind, pop: obj.userData.pop || 0 });
   }
   ranked.sort((a, b) => {
-    const w = { country: 3, adm1: 2, adm2: 1 };
-    return w[b.kind] - w[a.kind] || b.facing - a.facing;
+    const w = { country: 4, city: 3, adm1: 2, adm2: 1 };
+    const aw = w[a.kind] || 0;
+    const bw = w[b.kind] || 0;
+    if (a.kind === "city" && b.kind === "city") return b.pop - a.pop || b.facing - a.facing;
+    return bw - aw || b.facing - a.facing;
   });
   let adm2n = 0;
+  let cityn = 0;
+  let adm1n = 0;
   for (const { obj, kind } of ranked) {
-    if (kind === "adm2" && adm2n >= 22) continue;
+    if (kind === "adm2" && adm2n >= 18) continue;
+    if (kind === "city" && cityn >= 16) continue;
+    if (kind === "adm1" && adm1n >= 14) continue;
     proj.copy(obj.position).project(camera);
     const x = (proj.x * 0.5 + 0.5) * window.innerWidth;
     const y = (-proj.y * 0.5 + 0.5) * window.innerHeight;
-    const pad = kind === "adm2" ? 28 : 52;
+    const pad = kind === "adm2" || kind === "city" ? 36 : 70;
     if (taken.some((p) => Math.abs(p.x - x) < pad && Math.abs(p.y - y) < 16)) continue;
     obj.visible = true;
     taken.push({ x, y });
     if (kind === "adm2") adm2n += 1;
+    if (kind === "city") cityn += 1;
+    if (kind === "adm1") adm1n += 1;
   }
 }
 
 const _ray = new THREE.Raycaster();
 _ray.params.Line = { threshold: 0.01 };
+_ray.params.Points = { threshold: 0.03 };
 
 export function pick(layers, camera, ndc) {
   _ray.setFromCamera(ndc, camera);
   const dist = camera.position.length();
+
+  if (dist < 2.35 && layers.cityPoints?.visible) {
+    const ch = _ray.intersectObject(layers.cityPoints, false);
+    if (ch[0] && ch[0].index != null) {
+      const c = layers.cityIndex[ch[0].index];
+      if (c) {
+        setHighlight(layers, null);
+        return wrapPick(cityUserData(c));
+      }
+    }
+  }
+
   const set = [];
   if (dist < 2.05) set.push(...layers.adm2Fills.children);
   if (dist < 2.9) set.push(...layers.adm1Fills.children);
   set.push(...layers.countryFills.children);
   const hits = _ray.intersectObjects(set, false);
-  return hits[0]?.object || null;
+  const mesh = hits[0]?.object || null;
+  if (mesh && mesh.userData.kind !== "country") {
+    setHighlight(layers, null);
+    return mesh;
+  }
+
+  if (dist < 3.05) {
+    const ll = rayLonLat(camera, ndc);
+    if (ll) {
+      const feat = findAdm1(layers.worldAdm1, ll.lon, ll.lat);
+      if (feat) {
+        const extra = admFact(feat.properties.iso, feat.properties.name, "adm1");
+        setHighlight(layers, feat);
+        return wrapPick(adm1UserData(feat.properties, extra));
+      }
+    }
+  }
+
+  setHighlight(layers, null);
+  return mesh;
+}
+
+function rayLonLat(camera, ndc) {
+  _ray.setFromCamera(ndc, camera);
+  if (!_ray.ray.intersectSphere(_sphere, _hit)) return null;
+  return vector3ToLonLat(_hit);
+}
+
+function inBBox(lon, lat, b) {
+  if (!b || b.length < 4) return true;
+  const [minx, miny, maxx, maxy] = b;
+  if (lat < miny || lat > maxy) return false;
+  if (maxx >= minx) return lon >= minx && lon <= maxx;
+  return lon >= minx || lon <= maxx;
+}
+
+function findAdm1(features, lon, lat) {
+  for (const f of features) {
+    const p = f.properties;
+    if (!inBBox(lon, lat, p.bbox)) continue;
+    if (pointInFeature(f.geometry, lon, lat)) return f;
+  }
+  return null;
+}
+
+function pointInFeature(geom, lon, lat) {
+  for (const rings of polygonRings(geom)) {
+    if (!rings?.length) continue;
+    if (!pointInRing(lon, lat, rings[0])) continue;
+    let hole = false;
+    for (let i = 1; i < rings.length; i++) {
+      if (pointInRing(lon, lat, rings[i])) {
+        hole = true;
+        break;
+      }
+    }
+    if (!hole) return true;
+  }
+  return false;
+}
+
+function pointInRing(lon, lat, ring) {
+  let inside = false;
+  const n = ring.length;
+  for (let i = 0, j = n - 1; i < n; j = i++) {
+    let xi = ring[i][0];
+    let xj = ring[j][0];
+    const yi = ring[i][1];
+    const yj = ring[j][1];
+    if (xi - lon > 180) xi -= 360;
+    if (xi - lon < -180) xi += 360;
+    if (xj - lon > 180) xj -= 360;
+    if (xj - lon < -180) xj += 360;
+    const denom = yj - yi;
+    if (denom === 0) continue;
+    const intersect = (yi > lat) !== (yj > lat) && lon < ((xj - xi) * (lat - yi)) / denom + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function wrapPick(userData) {
+  return { isProxy: true, material: { opacity: 0 }, userData };
+}
+
+function samePick(a, b) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  const ua = a.userData || {};
+  const ub = b.userData || {};
+  return ua.kind === ub.kind && ua.name === ub.name && ua.iso === ub.iso;
 }
 
 let _hover = null;
 export function setHover(mesh) {
-  if (_hover === mesh) return _hover;
-  if (_hover) {
-    _hover.material.opacity = _hover.userData._op ?? _hover.material.opacity;
+  if (samePick(_hover, mesh)) return _hover;
+  if (_hover && !_hover.isProxy && _hover.material && _hover.userData._op != null) {
+    _hover.material.opacity = _hover.userData._op;
   }
   _hover = mesh;
-  if (mesh) {
+  if (mesh && !mesh.isProxy && mesh.material) {
     mesh.userData._op = mesh.material.opacity;
     mesh.material.opacity = Math.min(0.55, mesh.material.opacity + 0.28);
   }

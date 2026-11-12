@@ -34,7 +34,7 @@ const renderer = new THREE.WebGLRenderer({
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.05;
+renderer.toneMappingExposure = 1.18;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 
 const labelRenderer = new CSS2DRenderer({ element: document.getElementById("labels") });
@@ -61,7 +61,18 @@ controls.rotateSpeed = 0.55;
 controls.target.set(0, 0, 0);
 
 const clock = makeClock(new Date());
-const fly = { active: false, from: new THREE.Vector3(), to: new THREE.Vector3(), t: 0, dur: 1.1 };
+const fly = {
+  active: false,
+  from: new THREE.Vector3(),
+  to: new THREE.Vector3(),
+  fromDir: new THREE.Vector3(),
+  toDir: new THREE.Vector3(),
+  fromLen: 0,
+  toLen: 0,
+  start: 0,
+  dur: 900,
+};
+const _flyDir = new THREE.Vector3();
 
 const ndc = new THREE.Vector2();
 let layers = null;
@@ -80,6 +91,7 @@ async function init() {
   scene.add(globe.root);
 
   const geo = await loadLayers((msg) => setLoader(ui, msg));
+  setLoader(ui, "рисую границы и города");
   layers = buildLayers(geo);
   scene.add(layers.group);
 
@@ -88,7 +100,9 @@ async function init() {
     const extra =
       row.kind === "country"
         ? countryFact(row.iso)
-        : admFact(row.iso, row.sub, row.kind) || admFact(row.iso, row.title, row.kind);
+        : row.kind === "city"
+          ? row.extra || {}
+          : admFact(row.iso, row.sub, row.kind) || admFact(row.iso, row.title, row.kind);
     showCard(ui, {
       kind: row.kind,
       iso: row.iso,
@@ -128,13 +142,15 @@ function loadTextures() {
         url,
         (t) => {
           if (srgb) t.colorSpace = THREE.SRGBColorSpace;
-          t.anisotropy = 8;
+          t.anisotropy = 16;
           resolve(t);
         },
         undefined,
         reject
       );
     });
+  const optional = (url, srgb = true) =>
+    load(url, srgb).catch(() => null);
   return Promise.all([
     load(assetUrl("textures/earth_blue.jpg")),
     load(assetUrl("textures/earth_night2.jpg")),
@@ -142,13 +158,15 @@ function loadTextures() {
     load(assetUrl("textures/earth_spec.jpg"), false),
     load(assetUrl("textures/moon.jpg")),
     load(assetUrl("textures/starmap.jpg")),
-  ]).then(([day, night, normal, spec, moon, starmap]) => ({
+    optional(assetUrl("textures/earth_clouds.jpg")),
+  ]).then(([day, night, normal, spec, moon, starmap, clouds]) => ({
     day,
     night,
     normal,
     spec,
     moon,
     starmap,
+    clouds,
   }));
 }
 
@@ -160,12 +178,23 @@ function tick() {
     lastCard = performance.now();
   }
   if (fly.active) {
-    fly.t += 0.016 / fly.dur;
-    const k = 1 - Math.pow(1 - Math.min(1, fly.t), 3);
-    camera.position.lerpVectors(fly.from, fly.to, k);
-    if (fly.t >= 1) fly.active = false;
+    const u = Math.min(1, (performance.now() - fly.start) / fly.dur);
+    const k = 1 - Math.pow(1 - u, 3);
+    _flyDir.copy(fly.fromDir).lerp(fly.toDir, k);
+    if (_flyDir.lengthSq() < 1e-8) _flyDir.copy(fly.toDir);
+    else _flyDir.normalize();
+    const len = fly.fromLen + (fly.toLen - fly.fromLen) * k;
+    camera.position.copy(_flyDir).multiplyScalar(len);
+    camera.lookAt(0, 0, 0);
+    if (u >= 1) {
+      camera.position.copy(fly.to);
+      camera.lookAt(0, 0, 0);
+      fly.active = false;
+      controls.enabled = true;
+    }
+  } else {
+    controls.update();
   }
-  controls.update();
   if (layers) updateLayerLod(layers, camera);
   renderer.render(scene, camera);
   labelRenderer.render(scene, camera);
@@ -186,7 +215,7 @@ function onClick(e) {
   const mesh = pick(layers, camera, ndc);
   if (!mesh) return;
   const d = mesh.userData;
-  const dist = d.kind === "adm2" ? 1.26 : d.kind === "adm1" ? 1.5 : 2.15;
+  const dist = d.kind === "city" ? 1.22 : d.kind === "adm2" ? 1.26 : d.kind === "adm1" ? 1.5 : 2.15;
   flyTo(d.lon, d.lat, dist);
   showCard(ui, d);
 }
@@ -199,24 +228,31 @@ function onKey(e) {
   if (e.key === "0") flyTo(WORLD_VIEW.lon, WORLD_VIEW.lat, WORLD_VIEW.dist);
 }
 
+function beginFly(toVec, dur) {
+  if (!Number.isFinite(toVec.x) || toVec.lengthSq() < 1e-6) return;
+  fly.from.copy(camera.position);
+  fly.to.copy(toVec);
+  fly.fromLen = fly.from.length();
+  fly.toLen = fly.to.length();
+  fly.fromDir.copy(fly.from).normalize();
+  fly.toDir.copy(fly.to).normalize();
+  fly.start = performance.now();
+  fly.dur = dur;
+  fly.active = true;
+  controls.enabled = false;
+}
+
 function zoomBy(k) {
   const v = camera.position.clone();
   const len = v.length();
   const next = THREE.MathUtils.clamp(len * k, controls.minDistance, controls.maxDistance);
   v.setLength(next);
-  fly.from.copy(camera.position);
-  fly.to.copy(v);
-  fly.t = 0;
-  fly.dur = 0.35;
-  fly.active = true;
+  beginFly(v, 350);
 }
 
 function flyTo(lon, lat, dist) {
   lonLatToVector3(lon, lat, dist, fly.to);
-  fly.from.copy(camera.position);
-  fly.t = 0;
-  fly.dur = 0.9;
-  fly.active = true;
+  beginFly(fly.to, 900);
 }
 
 function placeCamera(lon, lat, dist) {

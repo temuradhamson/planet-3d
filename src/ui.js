@@ -50,7 +50,12 @@ export function renderClock(ui, astro) {
   ui.moon.textContent = `${Math.round(astro.moonPhase * 100)}% · ${moonPhaseName(astro.moonPhase)}`;
 }
 
-const KIND_RU = { country: "страна", adm1: "область / регион", adm2: "район" };
+const KIND_RU = {
+  country: "страна",
+  adm1: "область / регион",
+  adm2: "район",
+  city: "город",
+};
 const ISO_RU = { KAZ: "Казахстан", UZB: "Узбекистан", TJK: "Таджикистан" };
 
 export function showCard(ui, data) {
@@ -75,7 +80,8 @@ export function showCard(ui, data) {
     ["площадь", fmtKm2(area)],
     ["плотность", density(pop, area)],
   ];
-  if (extra.capital) rows.push(["столица / центр", extra.capital]);
+  if (data.kind === "city" && extra.capital) rows.push(["статус", extra.capital]);
+  else if (extra.capital) rows.push(["столица / центр", extra.capital]);
   if (extra.languages) rows.push(["языки", extra.languages]);
   if (extra.medianAge) rows.push(["медианный возраст", extra.medianAge]);
   if (extra.fertility) rows.push(["суммарная рождаемость", extra.fertility]);
@@ -94,6 +100,16 @@ export function showCard(ui, data) {
       : "");
 }
 
+function rankHit(r, s) {
+  const t = (r.title || "").toLowerCase();
+  const sub = (r.sub || "").toLowerCase();
+  if (t === s) return r.kind === "city" ? 0 : 1;
+  if (t.startsWith(s)) return r.kind === "city" ? 2 : 3;
+  if (sub === s || sub.startsWith(s)) return 4;
+  const kindW = { city: 5, country: 6, adm1: 7, adm2: 8 };
+  return kindW[r.kind] || 9;
+}
+
 export function bindSearch(ui, index, onPick) {
   let active = -1;
   const render = (q) => {
@@ -103,7 +119,10 @@ export function bindSearch(ui, index, onPick) {
       ui.results.innerHTML = "";
       return;
     }
-    const hits = index.filter((r) => r.q.includes(s)).slice(0, 12);
+    const hits = index
+      .filter((r) => r.q.includes(s))
+      .sort((a, b) => rankHit(a, s) - rankHit(b, s))
+      .slice(0, 12);
     ui.results.hidden = hits.length === 0;
     ui.results.innerHTML = hits
       .map(
